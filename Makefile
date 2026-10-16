@@ -13,9 +13,51 @@ TEMPERATURE := 0.8
 TOP_K      := 40
 REP_PENALTY := 1.2
 
-.PHONY: all build build-blas test clean train-bpe train run
+.SILENT:
+.DEFAULT_GOAL := help
+MAKEFLAGS += --no-print-directory
+
+.PHONY: all help build build-blas test test-verbose train-bpe train train-blas run clean
 
 all: build
+
+help:
+	printf '\n'
+	printf 'Usage: make <target> [VAR=value ...]\n'
+	printf '\n'
+	printf 'Targets:\n'
+	printf '  %-14s %s\n' 'help'         'show this message'
+	printf '  %-14s %s\n' 'build'        'build $(BINARY) (pure Go backend)'
+	printf '  %-14s %s\n' 'build-blas'   'build $(BINARY) with the gonum BLAS backend'
+	printf '  %-14s %s\n' 'test'         'run all tests'
+	printf '  %-14s %s\n' 'test-verbose' 'run all tests with verbose output'
+	printf '  %-14s %s\n' 'train-bpe'    'train the BPE tokenizer on $(INPUT)'
+	printf '  %-14s %s\n' 'train'        'train the GPT model (pure Go backend)'
+	printf '  %-14s %s\n' 'train-blas'   'train the GPT model with the BLAS backend'
+	printf '  %-14s %s\n' 'run'          'generate text from $(MODEL)'
+	printf '  %-14s %s\n' 'clean'        'remove build artifacts'
+	printf '\n'
+	printf 'Variables (current values):\n'
+	printf '  %-14s %s\n' 'BINARY'       '$(BINARY)'
+	printf '  %-14s %s\n' 'INPUT'        '$(INPUT)'
+	printf '  %-14s %s\n' 'TOKENIZER'    '$(TOKENIZER)'
+	printf '  %-14s %s\n' 'MODEL'        '$(MODEL)'
+	printf '  %-14s %s\n' 'VOCAB_SIZE'   '$(VOCAB_SIZE)'
+	printf '  %-14s %s\n' 'EPOCHS'       '$(EPOCHS)'
+	printf '  %-14s %s\n' 'LR'           '$(LR)'
+	printf '  %-14s %s\n' 'SEQ_LEN'      '$(SEQ_LEN)'
+	printf '  %-14s %s\n' 'PRINT_EVERY'  '$(PRINT_EVERY)'
+	printf '  %-14s %s\n' 'PROMPT'       '$(PROMPT)'
+	printf '  %-14s %s\n' 'TOKENS'       '$(TOKENS)'
+	printf '  %-14s %s\n' 'TEMPERATURE'  '$(TEMPERATURE)'
+	printf '  %-14s %s\n' 'TOP_K'        '$(TOP_K)'
+	printf '  %-14s %s\n' 'REP_PENALTY'  '$(REP_PENALTY)'
+	printf '\n'
+	printf 'Examples:\n'
+	printf '  make train EPOCHS=10 LR=0.0005\n'
+	printf '  make train-blas EPOCHS=5\n'
+	printf '  make run PROMPT="QUEEN:" TOKENS=120\n'
+	printf '\n'
 
 build:
 	go build -o $(BINARY) .

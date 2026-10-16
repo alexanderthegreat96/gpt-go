@@ -12,32 +12,37 @@ import (
 // Build requirement: go run/build -tags blas ...
 type BlasBackend struct{}
 
+func init() {
+	SetBackend(&BlasBackend{})
+}
+
+func general(m *Matrix) blas32.General {
+	stride := m.cols
+	if stride < 1 {
+		stride = 1
+	}
+	return blas32.General{
+		Rows:   m.rows,
+		Cols:   m.cols,
+		Stride: stride,
+		Data:   m.data,
+	}
+}
+
 func (bl *BlasBackend) MatMul(a, b *Matrix) *Matrix {
-	m, k, n := a.rows, a.cols, b.cols
-	c := NewMatrix(m, n)
-	blas32.Gemm(blas.NoTrans, blas.NoTrans, m, n, k,
-		1.0, a.data, k,
-		b.data, n,
-		0.0, c.data, n)
+	c := NewMatrix(a.rows, b.cols)
+	blas32.Gemm(blas.NoTrans, blas.NoTrans, 1, general(a), general(b), 0, general(c))
 	return c
 }
 
 func (bl *BlasBackend) MatMulTransB(a, b *Matrix) *Matrix {
-	m, k, n := a.rows, a.cols, b.rows
-	c := NewMatrix(m, n)
-	blas32.Gemm(blas.NoTrans, blas.Trans, m, n, k,
-		1.0, a.data, k,
-		b.data, k,
-		0.0, c.data, n)
+	c := NewMatrix(a.rows, b.rows)
+	blas32.Gemm(blas.NoTrans, blas.Trans, 1, general(a), general(b), 0, general(c))
 	return c
 }
 
 func (bl *BlasBackend) MatMulTransA(a, b *Matrix) *Matrix {
-	k, m, n := a.rows, a.cols, b.cols
-	c := NewMatrix(m, n)
-	blas32.Gemm(blas.Trans, blas.NoTrans, m, n, k,
-		1.0, a.data, m,
-		b.data, n,
-		0.0, c.data, n)
+	c := NewMatrix(a.cols, b.cols)
+	blas32.Gemm(blas.Trans, blas.NoTrans, 1, general(a), general(b), 0, general(c))
 	return c
 }
