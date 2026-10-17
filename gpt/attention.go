@@ -6,6 +6,29 @@ import (
 	"sync"
 )
 
+// Causal Multi-Head Self-Attention Implementation
+//
+// This implementation is broken down into 4 building blocks
+// 1. Weight Projections
+// So, instead of one attention calculation, multi-head attention projects the input vectors into
+// multiple "heads" using four weigth matrices:
+//   - Query -> what the token is looking for
+//   - Key -> the information the token contains
+//   - Value -> the actual content passed along if a match occurs
+//   - Output -> simply combines all "heads" together
+//
+// 2. Scaled Dot-Product Attention
+// For each head, we compute the attention scores by multiplying Queries by
+// Transposed Keys, scaling them using Softmax
+// 3. Causal Masking
+// In the context of text generation, a token should never look AT future words,
+// it needs to look at past and present ones. So we apply a causal mask which is
+// setting all future positions in the attention score matrix to negative infinity before
+// SoftMax, and this turns all probabilities to zero
+// 4. Multi-Head Splitting & Reshaping
+// Finally, we split the hidden dimensions across multiple "heads", compute attention in
+// parallel, then concatenate them back together
+
 type KvCache struct {
 	key   *Matrix
 	value *Matrix
@@ -24,10 +47,11 @@ func (c *KvCache) Clear() {
 }
 
 type CausalAttention struct {
-	dModel   int
-	numHeads int
-	headDim  int
+	dModel   int // hidden dimension
+	numHeads int // number of attention heads
+	headDim  int // dimensions per head
 
+	// the weight matrices
 	wq *Matrix
 	wk *Matrix
 	wv *Matrix
@@ -41,6 +65,8 @@ func NewCausalAttention(dmodel, numHeads int, scale float32) (*CausalAttention, 
 
 	headDim := dmodel / numHeads
 
+	// the weight matrices for Q K V and an output projection
+	// all shaped by dModel x dModel
 	wq := NewMatrix(dmodel, dmodel)
 	wk := NewMatrix(dmodel, dmodel)
 	wv := NewMatrix(dmodel, dmodel)
@@ -62,13 +88,22 @@ func NewCausalAttention(dmodel, numHeads int, scale float32) (*CausalAttention, 
 	}, nil
 }
 
+// causal projection which utilizes matrix multiplication
 func (ca *CausalAttention) Project(input *Matrix, weight *Matrix) (*Matrix, error) {
 	return input.MatrixMul(weight)
 }
 
+// Full-Attention Forward Pass
+// 1. projects the inputs into Q, K and V
+// 2. splits and reshapes them across multiple attention heads
+// 3. computes the raw attention scores and scales them + runs Softmax
+// 4. multiplies the resulting attention weights by V
+// 5. concatenates the heads back together and passes them through
+// the output projection Wo
 func (ca *CausalAttention) Forward(input *Matrix) (*Matrix, error) {
 	seqLen := input.rows
 
+	// time to project to Q, K and V
 	q, err := input.MatrixMul(ca.wq)
 	if err != nil {
 		return nil, err
@@ -84,11 +119,23 @@ func (ca *CausalAttention) Forward(input *Matrix) (*Matrix, error) {
 		return nil, err
 	}
 
+	// computing attention scores per head
+	// since we are doing this 100% in go with no libraries
+	// i'll be using reshape. now, is this IDEAL? hell no
+	// we would need a custom tensor library with arbitrary dimension scaling
+	// and turn stuff in 4D. should be able to do it later, though
+	// go is still performant enough and for an initial build, there is no point
+	// in doing that
+
+	// scale factor which is 1 over sqrt of headDim
 	scale := float32(1.0 / math.Sqrt(float64(ca.headDim)))
+
+	// result container for contatenated heads
 	headOutputs := NewMatrix(seqLen, ca.dModel)
 
 	var wg sync.WaitGroup
 
+	// parallelizing this to speed up
 	for h := 0; h < ca.numHeads; h++ {
 		wg.Add(1)
 		go func(h int) {
@@ -131,6 +178,7 @@ func (ca *CausalAttention) Forward(input *Matrix) (*Matrix, error) {
 
 	wg.Wait()
 
+	// the final output
 	output, err := headOutputs.MatrixMul(ca.wo)
 	if err != nil {
 		return nil, err
@@ -312,6 +360,8 @@ func (ca *CausalAttention) Backward(acts *AttentionActivations, dOut *Matrix) (*
 	return dInput, nil
 }
 
+// same as above, only with cache
+// i didn't add the comments since they would be reduntant here
 func (ca *CausalAttention) ForwardWithCache(input *Matrix, cache *KvCache) (*Matrix, error) {
 	currentSeqLen := input.rows
 
@@ -328,6 +378,8 @@ func (ca *CausalAttention) ForwardWithCache(input *Matrix, cache *KvCache) (*Mat
 		return nil, err
 	}
 
+	// utilizing the caching mechanism for keys and values
+	// down below
 	var k, v *Matrix
 	if cache != nil {
 		k, err = cache.key.ConcatRows(newK)

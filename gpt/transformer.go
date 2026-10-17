@@ -1,18 +1,33 @@
 package gpt
 
+// Transformer Block Implementation
+// In the case of the GPT architecture
+// the transformer block combines attention,
+// feed-foward networks (MLPs) and residual connections
+// which end up looking like this:
+// 1. attention:
+//   - input -> layer normalization -> causal multi-head attention -> residual connection
+//
+// 2. feed-forward sub-block (MLP)
+//   - output from attention -> layer normalization -> linear layer 1 -> GELU Activation
+//     -> Lineral Layer 2 -> Residual Connection
+
 type FeedForward struct {
 	dModel int
-	dInner int
-	w1     *Matrix
-	w2     *Matrix
+	dInner int     // likely 4 x dModel
+	w1     *Matrix // shape: dModel x dInner
+	w2     *Matrix // shape: dInner x dModel
 }
 
 func NewFeedForward(dModel int, scale float32) *FeedForward {
 	dInner := 4 * dModel
 	w1 := NewMatrix(dModel, dInner)
 	w2 := NewMatrix(dInner, dModel)
+
+	// weight randomization
 	w1.Randomize(scale)
 	w2.Randomize(scale)
+
 	return &FeedForward{
 		dModel: dModel,
 		dInner: dInner,
@@ -21,22 +36,34 @@ func NewFeedForward(dModel int, scale float32) *FeedForward {
 	}
 }
 
+// forward executes the FFN: linear1-> GELU -> linear2
 func (ff *FeedForward) Forward(input *Matrix) (*Matrix, error) {
+	// first linear projection aka expansion
 	hidden, err := input.MatrixMul(ff.w1)
 	if err != nil {
 		return nil, err
 	}
+
+	// apply gely activation
 	activated := hidden.GELU()
+
+	// second linear projection which contracts back to dModel
 	output, err := activated.MatrixMul(ff.w2)
 	if err != nil {
 		return nil, err
 	}
+
 	return output, nil
 }
 
+// transformer Block
+// combining Attention + FFN + Residuals
 type TransformerBlock struct {
-	attention         *CausalAttention
-	ffn               *FeedForward
+	attention *CausalAttention
+	ffn       *FeedForward
+
+	// layerNorm parameters for normalization sub-layers
+	// we can keep them nil initially
 	ln1Gamma, ln1Beta *Matrix
 	ln2Gamma, ln2Beta *Matrix
 	epsilon           float32
@@ -70,25 +97,38 @@ func NewTransformerBlock(dModel, numHeads int, scale float32) (*TransformerBlock
 	}, nil
 }
 
+// forward passes the input tensor through the complete transformer block
 func (tb *TransformerBlock) Forward(input *Matrix) (*Matrix, error) {
+	// pre-layer norm
 	norm1 := input.LayerNorm(tb.ln1Gamma, tb.ln1Beta, tb.epsilon)
+
+	// run the causal multi-head attention
 	attnOut, err := tb.attention.Forward(norm1)
 	if err != nil {
 		return nil, err
 	}
+
+	// add the original input to attention out -> residual connection
 	res1, err := input.MatrixAdd(attnOut)
 	if err != nil {
 		return nil, err
 	}
+
+	// pre-player normalize result before sending to ffn
 	norm2 := res1.LayerNorm(tb.ln2Gamma, tb.ln2Beta, tb.epsilon)
+
+	// now we run the feedback forward network
 	ffnOut, err := tb.ffn.Forward(norm2)
 	if err != nil {
 		return nil, err
 	}
+
+	// finally, the residual connection, adding res1 to ffn output
 	output, err := res1.MatrixAdd(ffnOut)
 	if err != nil {
 		return nil, err
 	}
+
 	return output, nil
 }
 
@@ -150,8 +190,6 @@ func (tb *TransformerBlock) ForwardSave(input *Matrix) (*Matrix, *BlockActivatio
 }
 
 func (tb *TransformerBlock) Backward(acts *BlockActivations, dOut *Matrix) (*Matrix, error) {
-	// output = res1 + ffnOut → d_ffnOut = dOut, d_res1 gets dOut (first contribution)
-
 	dFfnGELUOut, dW2, err := acts.ffnGELUOut.MatrixMulBackward(tb.ffn.w2, dOut)
 	if err != nil {
 		return nil, err
@@ -170,13 +208,11 @@ func (tb *TransformerBlock) Backward(acts *BlockActivations, dOut *Matrix) (*Mat
 	tb.ln2Gamma.AccumulateGrad(dLn2Gamma)
 	tb.ln2Beta.AccumulateGrad(dLn2Beta)
 
-	// total d_res1 = dOut (from residual) + dRes1FromLN2 (from LN2 path)
 	totalDRes1, err := dOut.MatrixAdd(dRes1FromLN2)
 	if err != nil {
 		return nil, err
 	}
 
-	// res1 = blockInput + attnOut → both receive totalDRes1
 	dNorm1, err := tb.attention.Backward(acts.attnActs, totalDRes1)
 	if err != nil {
 		return nil, err
@@ -186,7 +222,6 @@ func (tb *TransformerBlock) Backward(acts *BlockActivations, dOut *Matrix) (*Mat
 	tb.ln1Gamma.AccumulateGrad(dLn1Gamma)
 	tb.ln1Beta.AccumulateGrad(dLn1Beta)
 
-	// total d_blockInput = totalDRes1 (from res1 skip) + dBlockInputFromLN1 (from LN1 path)
 	dBlockInput, err := totalDRes1.MatrixAdd(dBlockInputFromLN1)
 	if err != nil {
 		return nil, err
@@ -195,6 +230,7 @@ func (tb *TransformerBlock) Backward(acts *BlockActivations, dOut *Matrix) (*Mat
 	return dBlockInput, nil
 }
 
+// identical to the one above, except using cache here
 func (tb *TransformerBlock) ForwardWithCache(input *Matrix, cache *KvCache) (*Matrix, error) {
 	normed := input.LayerNorm(tb.ln1Gamma, tb.ln1Beta, tb.epsilon)
 	attnOut, err := tb.attention.ForwardWithCache(normed, cache)

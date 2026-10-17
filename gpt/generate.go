@@ -1,5 +1,17 @@
 package gpt
 
+// Inference and Text Generation Loop
+// this is where it all comes together
+// in order of execution
+// 1. extract the last token logits which happens as a result of passing
+// a sequence of length N into model.Forward(tokenIDs), we then get a (seqLen x vocabSize) matrix.
+// Now, in order to predict the next token, we only care about the logits at the very end, which is
+// seqLen-1
+// 2. the next step is sampling and argmax. these raw logits are passed through softmax to turn them
+// into probabilities, pick up the highest probable token and return it
+// 3. the generation loop is the final stage where we append the predicated token ID into the input
+// slice, feed it back into the model and repeat for N steps to generate a full sequence
+
 import (
 	"math/rand"
 	"sort"
@@ -23,6 +35,7 @@ func (m *GPTModel) Generate(promptTokenIDs []int, maxNewTokens int, cfg Generate
 	currentTokens := make([]int, len(promptTokenIDs))
 	copy(currentTokens, promptTokenIDs)
 
+	// i am initializing an empty cache buffer here
 	caches := make([]*KvCache, m.numLayers)
 	for i := range caches {
 		caches[i] = &KvCache{}
@@ -103,6 +116,7 @@ func (m *GPTModel) Generate(promptTokenIDs []int, maxNewTokens int, cfg Generate
 
 		currentTokens = append(currentTokens, nextToken)
 
+		// token caching
 		if caches[0].key != nil && caches[0].key.rows >= m.maxSeqLen {
 			break
 		}
