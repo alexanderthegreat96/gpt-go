@@ -23,6 +23,11 @@ type GPTModel struct {
 	lmHead *Matrix
 }
 
+// little helper to get the Backend Name
+func GetActiveBackend() string {
+	return activeBackend.GetBackendName()
+}
+
 func NewGPTModel(vocabSize, dModel, numLayers, numHeads, maxSeqLen int, scale float32) (*GPTModel, error) {
 	tokenEmbed := NewEmbedding(vocabSize, dModel, scale)
 	positionEmbed := NewPositionalEmbedding(maxSeqLen, dModel, scale)

@@ -5,7 +5,6 @@ import (
 	"os"
 )
 
-// MatrixDTO represents a serializable version of a Matrix
 type MatrixDTO struct {
 	Rows int       `json:"rows"`
 	Cols int       `json:"cols"`
@@ -41,7 +40,6 @@ func deserializeMatrix(dto *MatrixDTO) (*Matrix, error) {
 	return NewMatrixFromData(dto.Rows, dto.Cols, dto.Data)
 }
 
-// TransformerBlockDTO represents a serialized transformer block
 type TransformerBlockDTO struct {
 	Wq       *MatrixDTO `json:"wq"`
 	Wk       *MatrixDTO `json:"wk"`
@@ -56,7 +54,6 @@ type TransformerBlockDTO struct {
 	Epsilon  float32    `json:"epsilon"`
 }
 
-// GPTModelDTO represents the complete serializable state of the GPT model
 type GPTModelDTO struct {
 	VocabSize    int                   `json:"vocab_size"`
 	DModel       int                   `json:"d_model"`
@@ -72,7 +69,6 @@ type GPTModelDTO struct {
 	LmHead       *MatrixDTO            `json:"lm_head"`
 }
 
-// SaveModel serializes and writes the GPTModel to a JSON file
 func SaveModel(model *GPTModel, filename string) error {
 	if model == nil {
 		return os.ErrInvalid
@@ -118,7 +114,6 @@ func SaveModel(model *GPTModel, filename string) error {
 	return os.WriteFile(filename, fileData, 0644)
 }
 
-// LoadModel reads and reconstructs a GPTModel from a JSON file matching your exact struct fields
 func LoadModel(filename string) (*GPTModel, error) {
 	fileData, err := os.ReadFile(filename)
 	if err != nil {
@@ -167,7 +162,6 @@ func LoadModel(filename string) (*GPTModel, error) {
 		weights:   posEmbedWeights,
 	}
 
-	// Restore blocks
 	headDim := dto.DModel / dto.NumHeads
 	for i, bDto := range dto.Blocks {
 		wq, _ := deserializeMatrix(bDto.Wq)
@@ -203,7 +197,6 @@ func LoadModel(filename string) (*GPTModel, error) {
 		}
 	}
 
-	// Restore final LayerNorm & LM Head
 	model.finalLnGamma, _ = deserializeMatrix(dto.FinalLnGamma)
 	model.finalLnBeta, _ = deserializeMatrix(dto.FinalLnBeta)
 	model.lmHead, _ = deserializeMatrix(dto.LmHead)

@@ -1,21 +1,7 @@
 package gpt
 
-// Matrix multiply is the single most expensive operation in both the forward and backward pass.
-// Every attention projection (Q, K, V, O), every FFN layer, and the LM head are all matmuls.
-// For a model with dModel=64 this is fine in pure Go, but as dModel grows the gap widens fast:
-// a naive triple loop gets maybe 5-10% of peak CPU throughput, while a BLAS implementation
-// (e.g. OpenBLAS via gonum) uses hand-written AVX/AVX-512 assembly, cache-blocking (tiling),
-// and fused multiply-add (FMA) instructions to reach 80-90% of peak — often a 10-20x difference
-// on large matrices.
-//
-// To keep the codebase dependency-free by default while still allowing that speedup, matrix
-// multiply is abstracted behind the Backend interface. The pure-Go GoBackend is always compiled
-// in and is the default. The BlasBackend lives in backend_blas.go behind a //go:build blas tag
-// and is only compiled when you pass -tags blas. Swapping at runtime is one call: SetBackend.
-// Everything else in the model — LayerNorm, GELU, Softmax, embeddings — is cheap enough that
-// it stays in plain Go regardless of which backend is active.
-
 type Backend interface {
+	GetBackendName() string
 	MatMul(a, b *Matrix) *Matrix
 	MatMulTransB(a, b *Matrix) *Matrix
 	MatMulTransA(a, b *Matrix) *Matrix
@@ -23,12 +9,11 @@ type Backend interface {
 
 var activeBackend Backend = &GoBackend{}
 
+// small helper to aid with unit testing
+// in the context of MLs, build tags are preffered
+// over setters
 func SetBackend(b Backend) {
 	activeBackend = b
-}
-
-func GetActiveBackendName() string {
-	return "Pure Go (Naive)"
 }
 
 // default impl
@@ -36,6 +21,13 @@ func GetActiveBackendName() string {
 // but this would be slower than using blas backend
 type GoBackend struct{}
 
+func (g *GoBackend) GetBackendName() string {
+	return "Pure GO (Native)"
+}
+
+// regular go backend
+// i implemented these by hand, and, although
+// they work, they are extremely slow
 func (g *GoBackend) MatMul(a, b *Matrix) *Matrix {
 	c := NewMatrix(a.rows, b.cols)
 	for i := 0; i < a.rows; i++ {

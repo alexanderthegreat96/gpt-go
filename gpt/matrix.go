@@ -167,3 +167,6 @@ func (m *Matrix) MatrixMulBackward(other *Matrix, dC *Matrix) (*Matrix, *Matrix,
 
 	return dA, dB, nil
 }
+
+// the matrix multiplication and addition methods are bound within backend.go and backend_blas.go
+// the reason is quite simple: blas is faster due to custom assembly

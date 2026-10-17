@@ -56,7 +56,7 @@ var trainGptCmd = &cobra.Command{
 			return
 		}
 
-		fmt.Printf("Using Backend: %s\n", gpt.GetActiveBackendName())
+		fmt.Printf("Using Backend: %s\n", gpt.GetActiveBackend())
 		fmt.Printf("Using Tokenizer File: %s\n", gptTokenizerFile)
 		fmt.Printf("Training Using File: %s\n", gptInputFile)
 
