@@ -27,6 +27,10 @@ func SetBackend(b Backend) {
 	activeBackend = b
 }
 
+func GetActiveBackendName() string {
+	return "Pure Go (Naive)"
+}
+
 // default impl
 // the idea was to have the system run purely in go
 // but this would be slower than using blas backend

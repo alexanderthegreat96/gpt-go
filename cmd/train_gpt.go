@@ -56,6 +56,10 @@ var trainGptCmd = &cobra.Command{
 			return
 		}
 
+		fmt.Printf("Using Backend: %s\n", gpt.GetActiveBackendName())
+		fmt.Printf("Using Tokenizer File: %s\n", gptTokenizerFile)
+		fmt.Printf("Training Using File: %s\n", gptInputFile)
+
 		optimizer := gpt.NewAdamW(float32(gptLR), 0.9, 0.999, 1e-8, 0.01)
 
 		contextSize := gptMaxSeqLen
@@ -130,9 +134,9 @@ var trainGptCmd = &cobra.Command{
 }
 
 func init() {
-	trainGptCmd.Flags().StringVarP(&gptInputFile, "input", "i", "train.txt", "Path to training text corpus file")
-	trainGptCmd.Flags().StringVarP(&gptTokenizerFile, "tokenizer", "t", "tokenizer_model_data.json", "Path to tokenizer JSON file")
-	trainGptCmd.Flags().StringVarP(&gptOutputFile, "output", "o", "gpt_model.json", "Path to save trained GPT model JSON")
+	trainGptCmd.Flags().StringVarP(&gptInputFile, "input", "i", "models/tiny_wiki/train.txt", "Path to training text corpus file")
+	trainGptCmd.Flags().StringVarP(&gptTokenizerFile, "tokenizer", "t", "models/tiny_wiki/tokenizer_model_data.json", "Path to tokenizer JSON file")
+	trainGptCmd.Flags().StringVarP(&gptOutputFile, "output", "o", "models/tiny_wiki/gpt_model.json", "Path to save trained GPT model JSON")
 	trainGptCmd.Flags().IntVarP(&gptEpochs, "epochs", "e", 5, "Number of training epochs")
 	trainGptCmd.Flags().Float64VarP(&gptLR, "lr", "l", 0.001, "Learning rate for AdamW")
 	trainGptCmd.Flags().IntVarP(&gptMaxSeqLen, "seq-len", "s", 64, "Maximum sequence / context length")

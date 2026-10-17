@@ -1,13 +1,13 @@
 BINARY     := gpt-go
-INPUT      := train.txt
-TOKENIZER  := tokenizer_model_data.json
-MODEL      := gpt_model.json
+INPUT      := models/tiny_wiki/train.txt
+TOKENIZER  := models/tiny_wiki/tokenizer_model_data.json
+MODEL      := models/tiny_wiki/gpt_model.json
 VOCAB_SIZE := 2000
 EPOCHS     := 5
 LR         := 0.001
 SEQ_LEN    := 64
 PRINT_EVERY := 50
-PROMPT     := KING:
+PROMPT     := "hello world"
 TOKENS     := 50
 TEMPERATURE := 0.8
 TOP_K      := 40

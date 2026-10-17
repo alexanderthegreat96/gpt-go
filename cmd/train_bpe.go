@@ -22,6 +22,8 @@ var trainBpeCmd = &cobra.Command{
 		now := time.Now()
 
 		fmt.Println("Initializing BPE Training...")
+		fmt.Printf("Training using: %s\n", bpeInputFile)
+
 		vocabulary := bpe.NewVocabulary(bpeCapacity)
 
 		specialTokens := []string{
@@ -55,7 +57,7 @@ var trainBpeCmd = &cobra.Command{
 func init() {
 	trainBpeCmd.Flags().IntVar(&bpeCapacity, "capacity", 300, "Vocabulary capacity")
 	trainBpeCmd.Flags().IntVar(&bpeMaxVocab, "max-vocab", 2000, "Maximum vocabulary size during training")
-	trainBpeCmd.Flags().StringVarP(&bpeInputFile, "input", "i", "train.txt", "Path to training text corpus file")
+	trainBpeCmd.Flags().StringVarP(&bpeInputFile, "input", "i", "models/tiny_wiki/train.txt", "Path to training text corpus file")
 	trainBpeCmd.Flags().StringVarP(&bpeOutputFile, "output", "o", "tokenizer_model_data.json", "Path to save tokenizer JSON")
 
 	rootCmd.AddCommand(trainBpeCmd)

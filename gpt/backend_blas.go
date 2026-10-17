@@ -12,6 +12,10 @@ import (
 // Build requirement: go run/build -tags blas ...
 type BlasBackend struct{}
 
+func GetActiveBackendName() string {
+	return "Gonum BLAS"
+}
+
 func init() {
 	SetBackend(&BlasBackend{})
 }

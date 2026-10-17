@@ -33,6 +33,8 @@ var runCmd = &cobra.Command{
 		encoded := vocab.Encode(runPrompt)
 
 		fmt.Printf("Prompt: %s\n", runPrompt)
+		fmt.Printf("Using Tokenizer File: %s\n", runTokenizerFile)
+		fmt.Printf("Using Model File: %s\n", runModelFile)
 		fmt.Printf("Encoded Prompt Tokens: %v\n", encoded)
 
 		model, err := gpt.LoadModel(runModelFile)
@@ -76,8 +78,8 @@ var runCmd = &cobra.Command{
 
 func init() {
 	runCmd.Flags().StringVarP(&runPrompt, "prompt", "p", "Hello world", "Prompt text for generation")
-	runCmd.Flags().StringVarP(&runTokenizerFile, "tokenizer", "t", "tokenizer_model_data.json", "Path to tokenizer JSON file")
-	runCmd.Flags().StringVarP(&runModelFile, "model", "m", "gpt_model.json", "Path to trained GPT model JSON file")
+	runCmd.Flags().StringVarP(&runTokenizerFile, "tokenizer", "t", "models/tiny_wiki/tokenizer_model_data.json", "Path to tokenizer JSON file")
+	runCmd.Flags().StringVarP(&runModelFile, "model", "m", "models/tiny_wiki/gpt_model.json", "Path to trained GPT model JSON file")
 	runCmd.Flags().IntVarP(&runMaxNewTokens, "tokens", "n", 8, "Maximum new tokens to generate")
 	runCmd.Flags().Float64Var(&runTemperature, "temperature", 1.0, "Sampling temperature (0 = greedy argmax)")
 	runCmd.Flags().IntVarP(&runTopK, "top-k", "k", 40, "Top-k sampling pool size (0 = full distribution)")
