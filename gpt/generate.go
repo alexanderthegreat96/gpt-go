@@ -21,6 +21,44 @@ type GenerateConfig struct {
 	Temperature       float32
 	TopK              int
 	RepetitionPenalty float32
+
+	// StopTokenIDs ends generation early if any of these comes up.
+	//
+	// gpt-2 needs this: it emits 50256 to mean "this document is finished",
+	// and without stopping you get a fresh unrelated document stapled onto
+	// your answer. a slice rather than a single id on purpose -> nil is the
+	// zero value and means "do not stop", so every existing caller keeps the
+	// behaviour it had. an int field would have made id 0 a stop token by
+	// accident for the models we train ourselves
+	StopTokenIDs []int
+
+	// SlideContext keeps generating once the context window is full, instead
+	// of stopping dead at maxSeqLen.
+	//
+	// it has to rebuild the KV cache rather than just dropping old rows,
+	// because gpt-2's positional embeddings are ABSOLUTE and baked into the
+	// cached keys at the input. drop the first row and the remaining entries
+	// still claim positions 1..n while the next token would be handed position
+	// n again -> two tokens at the same position and a model that quietly
+	// loses track of word order.
+	//
+	// so when the window fills we keep the most recent half, clear the caches
+	// and re-run a forward pass over the retained tokens, which numbers their
+	// positions from zero again. that costs one prefill every maxSeqLen/2
+	// tokens. keeping all but one token instead would be correct too, and
+	// would re-prefill on every single token from then on
+	SlideContext bool
+
+	// OnToken, when set, is called with each token as it is produced, before
+	// the next forward pass runs. nil means nothing happens, which is what
+	// every existing caller gets.
+	//
+	// this is what lets the repl print as it goes instead of sitting silent
+	// for two seconds. note the callback receives token IDS, not text -> byte
+	// level BPE means a single token can be a fragment of a utf-8 sequence,
+	// so whoever is printing has to buffer bytes and only emit complete
+	// characters. see the repl for how
+	OnToken func(tokenID int)
 }
 
 func DefaultGenerateConfig() GenerateConfig {
@@ -29,6 +67,46 @@ func DefaultGenerateConfig() GenerateConfig {
 		TopK:              40,
 		RepetitionPenalty: 1.0,
 	}
+}
+
+// slideContext throws away the oldest half of the context and rebuilds the KV
+// caches from the rest, so generation can keep going past maxSeqLen.
+//
+// the rebuild is the whole trick. positional embeddings are added at the input
+// and are therefore already inside every cached key and value, so the cache
+// cannot simply be trimmed -> the retained entries would keep their old
+// absolute positions while new tokens got numbered from the shortened length,
+// putting two tokens at the same position. re-running the forward pass over
+// the retained tokens with an empty cache renumbers them from zero.
+//
+// returns the logits for the last retained token, which is what the sampling
+// loop needs to carry on
+func (m *GPTModel) slideContext(tokens []int, caches []*KvCache) (*Matrix, error) {
+	keep := m.maxSeqLen / 2
+	if keep < 1 {
+		keep = 1
+	}
+	if keep > len(tokens) {
+		keep = len(tokens)
+	}
+
+	retained := tokens[len(tokens)-keep:]
+
+	for i := range caches {
+		caches[i] = &KvCache{}
+	}
+
+	return m.ForwardWithCache(retained, caches)
+}
+
+// isStopToken reports whether generation should end on this token
+func (cfg GenerateConfig) isStopToken(tokenID int) bool {
+	for _, stop := range cfg.StopTokenIDs {
+		if tokenID == stop {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *GPTModel) Generate(promptTokenIDs []int, maxNewTokens int, cfg GenerateConfig) ([]int, error) {
@@ -116,9 +194,28 @@ func (m *GPTModel) Generate(promptTokenIDs []int, maxNewTokens int, cfg Generate
 
 		currentTokens = append(currentTokens, nextToken)
 
+		if cfg.OnToken != nil {
+			cfg.OnToken(nextToken)
+		}
+
+		// the model said it is done -> keep the token, it is part of the
+		// output, but stop generating past it
+		if cfg.isStopToken(nextToken) {
+			break
+		}
+
 		// token caching
 		if caches[0].key != nil && caches[0].key.rows >= m.maxSeqLen {
-			break
+			if !cfg.SlideContext {
+				break
+			}
+
+			var err error
+			logits, err = m.slideContext(currentTokens, caches)
+			if err != nil {
+				return nil, err
+			}
+			continue
 		}
 
 		logits, err = m.ForwardWithCache([]int{nextToken}, caches)

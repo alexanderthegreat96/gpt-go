@@ -38,6 +38,15 @@ type GPTModel struct {
 	// for educational purposes a separate projection matrix is straight forward
 	// will probably mess with this as well
 	lmHead *Matrix
+
+	// gpt-2 DOES tie them, so when we load a pretrained checkpoint this ends
+	// up as a transposed copy of tokenEmbed rather than its own weights.
+	// we only track it so the parameter count doesn't double up.
+	//
+	// heads up if you ever fine-tune a loaded model: it is a transposed COPY,
+	// not a shared view, so the two would drift apart during training. real
+	// tying (one matrix, read both ways) is a separate change
+	lmHeadTied bool
 }
 
 func NewGPTModel(vocabSize, dModel, numLayers, numHeads, maxSeqLen int, scale float32) (*GPTModel, error) {
@@ -238,6 +247,17 @@ func (m *GPTModel) Backward(dLogits *Matrix, acts *ModelActivations) error {
 	}
 
 	seqLen := len(acts.inputTokenIDs)
+
+	// these two write into grad by raw index instead of going through
+	// AccumulateGrad, because each token only touches one row of the embedding
+	// table. that means they have to ask for the buffer themselves.
+	//
+	// it goes HERE, above the loops, for two reasons: the writes below would
+	// panic on a nil slice if it happened after them, and a nil check per
+	// element would run millions of times per step for nothing
+	m.tokenEmbed.weights.ensureGrad()
+	m.positionEmbed.weights.ensureGrad()
+
 	for i := 0; i < seqLen; i++ {
 		tokenID := acts.inputTokenIDs[i]
 		embStart := tokenID * m.dModel
@@ -265,10 +285,60 @@ func (m *GPTModel) GetTrainableParameters() []*Matrix {
 		params = append(params, block.ffn.w1, block.ffn.w2)
 		// layernorm param
 		params = append(params, block.ln1Gamma, block.ln1Beta, block.ln2Gamma, block.ln2Beta)
+		// the bias terms, which only exist on pretrained models -> we skip the
+		// nils, but they do have to show up here or ZeroGrads would leave stale
+		// gradients sitting on them between steps
+		params = appendIfNotNil(params,
+			block.attention.bq, block.attention.bk, block.attention.bv, block.attention.bo,
+			block.ffn.b1, block.ffn.b2)
 	}
 	params = append(params, m.finalLnGamma, m.finalLnBeta, m.lmHead)
 
 	return params
+}
+
+// appendIfNotNil keeps the optional parameters out of the list entirely when a
+// model simply does not have them
+func appendIfNotNil(params []*Matrix, candidates ...*Matrix) []*Matrix {
+	for _, c := range candidates {
+		if c != nil {
+			params = append(params, c)
+		}
+	}
+	return params
+}
+
+// Describe hands the model's shape out to anything outside this package, since
+// all of these fields are unexported
+func (m *GPTModel) Describe() (vocabSize, dModel, numLayers, numHeads, maxSeqLen int) {
+	return m.vocabSize, m.dModel, m.numLayers, m.numHeads, m.maxSeqLen
+}
+
+// IsLMHeadTied reports whether the lm head came from the token embeddings
+// rather than from weights of its own
+func (m *GPTModel) IsLMHeadTied() bool {
+	return m.lmHeadTied
+}
+
+// CountParameters totals up every weight in the model.
+//
+// when the lm head is tied we leave it out, because it is the same parameters
+// as the token embeddings seen from the other side -> counting it twice is how
+// you end up claiming gpt-2 small has 163M parameters instead of 124M.
+// note that we DO still pay for it in memory, since we materialize the
+// transpose as its own matrix rather than transposing on the fly
+func (m *GPTModel) CountParameters() int {
+	total := 0
+	for _, p := range m.GetTrainableParameters() {
+		if p == nil {
+			continue
+		}
+		if m.lmHeadTied && p == m.lmHead {
+			continue
+		}
+		total += p.rows * p.cols
+	}
+	return total
 }
 
 func (m *GPTModel) ZeroGrads() {

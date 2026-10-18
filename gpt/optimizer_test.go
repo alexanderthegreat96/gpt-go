@@ -11,7 +11,14 @@ func TestAdamWOptimizer(t *testing.T) {
 		t.Fatalf("failed to create param matrix: %v", err)
 	}
 
-	param.grad[0] = 0.5
+	// gradients are lazily allocated now, so poking param.grad directly would
+	// index a nil slice. going through AccumulateGrad is both correct and
+	// closer to what a real training step does
+	incoming, err := NewMatrixFromData(1, 1, []float32{0.5})
+	if err != nil {
+		t.Fatalf("failed to create gradient matrix: %v", err)
+	}
+	param.AccumulateGrad(incoming)
 
 	optimizer := NewAdamW(0.01, 0.9, 0.999, 1e-8, 0.01)
 

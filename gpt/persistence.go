@@ -2,6 +2,7 @@ package gpt
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
@@ -52,6 +53,23 @@ type TransformerBlockDTO struct {
 	Ln2Gamma *MatrixDTO `json:"ln2_gamma"`
 	Ln2Beta  *MatrixDTO `json:"ln2_beta"`
 	Epsilon  float32    `json:"epsilon"`
+
+	// everything below only exists on models that came out of a pretrained
+	// checkpoint, hence omitempty -> a model we trained ourselves writes the
+	// exact same json it always did, and old model files still load as before.
+	//
+	// these HAVE to be here even though we would rather load gpt-2 from
+	// safetensors every time. if they were missing, saving a loaded gpt-2 and
+	// reading it back would quietly drop its biases and flip its activation
+	// function, which is precisely the kind of silent wrongness this whole
+	// exercise is built to avoid
+	Bq          *MatrixDTO `json:"bq,omitempty"`
+	Bk          *MatrixDTO `json:"bk,omitempty"`
+	Bv          *MatrixDTO `json:"bv,omitempty"`
+	Bo          *MatrixDTO `json:"bo,omitempty"`
+	B1          *MatrixDTO `json:"b1,omitempty"`
+	B2          *MatrixDTO `json:"b2,omitempty"`
+	UseTanhGELU bool       `json:"use_tanh_gelu,omitempty"`
 }
 
 type GPTModelDTO struct {
@@ -67,11 +85,34 @@ type GPTModelDTO struct {
 	FinalLnGamma *MatrixDTO            `json:"final_ln_gamma"`
 	FinalLnBeta  *MatrixDTO            `json:"final_ln_beta"`
 	LmHead       *MatrixDTO            `json:"lm_head"`
+
+	// whether the lm head above is really just the token embeddings seen from
+	// the other side. only affects the parameter count, but losing it would
+	// make a reloaded gpt-2 claim 163M parameters instead of 124M
+	LmHeadTied bool `json:"lm_head_tied,omitempty"`
 }
 
 func SaveModel(model *GPTModel, filename string) error {
 	if model == nil {
 		return os.ErrInvalid
+	}
+
+	// a quantized model has no float32 weights left, so serializing it would
+	// write a file full of nulls that loads without complaint and produces
+	// garbage. refuse instead
+	for i, block := range model.blocks {
+		for name, weight := range map[string]*Matrix{
+			"wq": block.attention.wq, "wk": block.attention.wk,
+			"wv": block.attention.wv, "wo": block.attention.wo,
+			"w1": block.ffn.w1, "w2": block.ffn.w2,
+		} {
+			if weight != nil && weight.IsQuantized() {
+				return fmt.Errorf("SaveModel: block %d %s is quantized -> our json format only stores float32 weights", i, name)
+			}
+		}
+	}
+	if model.lmHead != nil && model.lmHead.IsQuantized() {
+		return fmt.Errorf("SaveModel: the lm head is quantized -> our json format only stores float32 weights")
 	}
 
 	blocksDTO := make([]TransformerBlockDTO, len(model.blocks))
@@ -88,6 +129,16 @@ func SaveModel(model *GPTModel, filename string) error {
 			Ln2Gamma: serializeMatrix(b.ln2Gamma),
 			Ln2Beta:  serializeMatrix(b.ln2Beta),
 			Epsilon:  b.epsilon,
+
+			// nil in, nil out -> omitempty keeps these out of the file
+			// entirely for models that never had them
+			Bq:          serializeMatrix(b.attention.bq),
+			Bk:          serializeMatrix(b.attention.bk),
+			Bv:          serializeMatrix(b.attention.bv),
+			Bo:          serializeMatrix(b.attention.bo),
+			B1:          serializeMatrix(b.ffn.b1),
+			B2:          serializeMatrix(b.ffn.b2),
+			UseTanhGELU: b.ffn.useTanhGELU,
 		}
 	}
 
@@ -104,6 +155,7 @@ func SaveModel(model *GPTModel, filename string) error {
 		FinalLnGamma: serializeMatrix(model.finalLnGamma),
 		FinalLnBeta:  serializeMatrix(model.finalLnBeta),
 		LmHead:       serializeMatrix(model.lmHead),
+		LmHeadTied:   model.lmHeadTied,
 	}
 
 	fileData, err := json.Marshal(dto)
@@ -175,6 +227,21 @@ func LoadModel(filename string) (*GPTModel, error) {
 		ln2Gamma, _ := deserializeMatrix(bDto.Ln2Gamma)
 		ln2Beta, _ := deserializeMatrix(bDto.Ln2Beta)
 
+		// the optional pretrained extras. deserializeMatrix hands back nil for
+		// a nil DTO, so an older model file lands here with no biases at all
+		// and the erf GELU, exactly as it behaved before any of this existed
+		bq, _ := deserializeMatrix(bDto.Bq)
+		bk, _ := deserializeMatrix(bDto.Bk)
+		bv, _ := deserializeMatrix(bDto.Bv)
+		bo, _ := deserializeMatrix(bDto.Bo)
+		b1, _ := deserializeMatrix(bDto.B1)
+		b2, _ := deserializeMatrix(bDto.B2)
+
+		dInner := 0
+		if w1 != nil {
+			dInner = w1.cols
+		}
+
 		model.blocks[i] = &TransformerBlock{
 			attention: &CausalAttention{
 				wq:       wq,
@@ -184,10 +251,19 @@ func LoadModel(filename string) (*GPTModel, error) {
 				numHeads: dto.NumHeads,
 				headDim:  headDim,
 				dModel:   dto.DModel,
+				bq:       bq,
+				bk:       bk,
+				bv:       bv,
+				bo:       bo,
 			},
 			ffn: &FeedForward{
-				w1: w1,
-				w2: w2,
+				dModel:      dto.DModel,
+				dInner:      dInner,
+				w1:          w1,
+				w2:          w2,
+				b1:          b1,
+				b2:          b2,
+				useTanhGELU: bDto.UseTanhGELU,
 			},
 			ln1Gamma: ln1Gamma,
 			ln1Beta:  ln1Beta,
@@ -200,6 +276,7 @@ func LoadModel(filename string) (*GPTModel, error) {
 	model.finalLnGamma, _ = deserializeMatrix(dto.FinalLnGamma)
 	model.finalLnBeta, _ = deserializeMatrix(dto.FinalLnBeta)
 	model.lmHead, _ = deserializeMatrix(dto.LmHead)
+	model.lmHeadTied = dto.LmHeadTied
 
 	return model, nil
 }

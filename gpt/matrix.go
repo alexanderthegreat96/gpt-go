@@ -15,6 +15,15 @@ type Matrix struct {
 	cols int
 	data []float32
 	grad []float32
+
+	// when non-nil this matrix holds int8 weights instead of float32 ones,
+	// and data is released. keeping it here rather than in a separate type
+	// means MatrixMul is the ONLY place that has to know -> every existing
+	// input.MatrixMul(weight) call site works unchanged.
+	//
+	// only ever set on weights used purely as a matmul operand. see
+	// quantize.go for which those are and why
+	quant *quantizedWeights
 }
 
 func NewMatrix(rows, cols int) *Matrix {
@@ -22,7 +31,7 @@ func NewMatrix(rows, cols int) *Matrix {
 		rows: rows,
 		cols: cols,
 		data: make([]float32, rows*cols),
-		grad: make([]float32, rows*cols),
+		// grad stays nil until something back propagates it
 	}
 }
 
@@ -34,10 +43,12 @@ func NewMatrixFromData(rows, cols int, data []float32) (*Matrix, error) {
 		rows: rows,
 		cols: cols,
 		data: append([]float32(nil), data...),
-		grad: make([]float32, rows*cols),
+		// grad stays nil until something back propagates it
 	}, nil
 }
 
+// a matrix that never had a gradient has nothing to zero, and ranging over a
+// nil slice is a no-op, so this needs no nil check of its own
 func (m *Matrix) ZeroGrad() {
 	for i := range m.grad {
 		m.grad[i] = 0.0
@@ -45,6 +56,13 @@ func (m *Matrix) ZeroGrad() {
 }
 
 func (m *Matrix) AccumulateGrad(dM *Matrix) {
+	// this call is not optional. without it, a matrix whose grad is still nil
+	// ranges over an empty slice and this whole function silently does
+	// NOTHING -> every weight gradient gets thrown away, training runs, the
+	// loss looks vaguely plausible and the model learns nothing at all.
+	// no panic, no error. ask me how I know
+	m.ensureGrad()
+
 	for i := range m.grad {
 		m.grad[i] += dM.data[i]
 	}
@@ -58,6 +76,20 @@ func (m *Matrix) MatrixMul(other *Matrix) (*Matrix, error) {
 	if m.cols != other.rows {
 		return nil, fmt.Errorf("dimension mismatch for MatMul: %dx%d and %dx%d", m.rows, m.cols, other.rows, other.cols)
 	}
+
+	// the one and only place that knows about quantization. the weights get
+	// converted to int8, activations stay float32, and this picks the matching
+	// kernel -> nothing in attention or the mlp changes
+	if other.IsQuantized() {
+		if m.IsQuantized() {
+			return nil, fmt.Errorf("MatMul: both operands are quantized, only the weights should be")
+		}
+		return matMulQuantized(m, other), nil
+	}
+	if m.IsQuantized() {
+		return nil, fmt.Errorf("MatMul: the left operand is quantized, that should only ever be the weights on the right")
+	}
+
 	return activeBackend.MatMul(m, other), nil
 }
 
@@ -74,6 +106,72 @@ func (m *Matrix) MatrixAdd(other *Matrix) (*Matrix, error) {
 	}
 
 	return resultingMatrix, nil
+}
+
+// AddRowBias adds a 1 x cols bias vector to every row of the matrix, in place.
+//
+// we never needed this before because nothing we build from scratch uses bias
+// terms. gpt-2 does, on every single linear layer -> it was written with
+// Conv1D rather than nn.Linear and the forward pass is literally
+// x @ weight + bias. that means four bias vectors per block (c_attn, the
+// attention c_proj, mlp c_fc, mlp c_proj) and without them the output is not
+// approximately right, it is just wrong
+//
+// a nil bias is a deliberate no-op. that way every existing call site keeps
+// working untouched and only the pretrained path pays for this
+func (m *Matrix) AddRowBias(bias *Matrix) error {
+	if bias == nil {
+		return nil
+	}
+
+	if bias.rows != 1 || bias.cols != m.cols {
+		return fmt.Errorf("bias shape %dx%d cannot broadcast over %dx%d", bias.rows, bias.cols, m.rows, m.cols)
+	}
+
+	for i := 0; i < m.rows; i++ {
+		rowStart := i * m.cols
+		for j := 0; j < m.cols; j++ {
+			m.data[rowStart+j] += bias.data[j]
+		}
+	}
+
+	return nil
+}
+
+// ColumnSums collapses a matrix down to a single 1 x cols row by summing each
+// column. this is exactly the gradient of a row-broadcast bias: the same bias
+// vector got added to every row on the way forward, so on the way back every
+// row contributes to it
+func (m *Matrix) ColumnSums() *Matrix {
+	result := NewMatrix(1, m.cols)
+	for i := 0; i < m.rows; i++ {
+		rowStart := i * m.cols
+		for j := 0; j < m.cols; j++ {
+			result.data[j] += m.data[rowStart+j]
+		}
+	}
+	return result
+}
+
+// accumulateBiasGrad folds the column sums of an output gradient into a bias
+// term, skipping the whole thing when that bias does not exist. keeps the
+// backward passes from being littered with nil checks
+func accumulateBiasGrad(bias *Matrix, dOut *Matrix) {
+	if bias == nil {
+		return
+	}
+	bias.AccumulateGrad(dOut.ColumnSums())
+}
+
+// lazyly allocate the gradient buffer on first write
+// before making use of this, every matrix used to allocate a gradient slice
+// the same size as its data, wether anything or not would backpropagade it
+// now, if you train something small, it's fine.
+// but for inference, that is simply wasted space
+func (m *Matrix) ensureGrad() {
+	if m.grad == nil {
+		m.grad = make([]float32, len(m.data))
+	}
 }
 
 // in self attention, we have to multiply the Query meatrix (Q)
@@ -153,6 +251,13 @@ func (m *Matrix) ConcatRows(other *Matrix) (*Matrix, error) {
 }
 
 func (m *Matrix) MatrixMulBackward(other *Matrix, dC *Matrix) (*Matrix, *Matrix, error) {
+	// a quantized weight has no float32 data left to differentiate, and the
+	// int8 values are not what the gradient is with respect to. fail loudly
+	// rather than nil dereference somewhere deeper
+	if m.IsQuantized() || other.IsQuantized() {
+		return nil, nil, fmt.Errorf("MatMulBackward: operand is quantized -> a quantized model is for inference only")
+	}
+
 	if m.cols != other.rows {
 		return nil, nil, fmt.Errorf("dimension mismatch for backward pass: %dx%d and %dx%d", m.rows, m.cols, other.rows, other.cols)
 	}

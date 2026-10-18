@@ -56,6 +56,16 @@ type CausalAttention struct {
 	wk *Matrix
 	wv *Matrix
 	wo *Matrix
+
+	// the bias vectors, shape 1 x dModel each
+	// these stay nil for models we train ourselves -> we never used biases and
+	// adding them now would change the dynamics of everything already trained.
+	// pretrained gpt-2 checkpoints DO carry them, so the loader fills them in
+	// and every forward path below treats nil as "skip it"
+	bq *Matrix
+	bk *Matrix
+	bv *Matrix
+	bo *Matrix
 }
 
 func NewCausalAttention(dmodel, numHeads int, scale float32) (*CausalAttention, error) {
@@ -93,6 +103,20 @@ func (ca *CausalAttention) Project(input *Matrix, weight *Matrix) (*Matrix, erro
 	return input.MatrixMul(weight)
 }
 
+// same as Project but it also applies a bias afterwards -> x @ w + b
+// this is what all four projections actually call now, since a nil bias makes
+// it behave identically to the plain version
+func (ca *CausalAttention) projectBiased(input, weight, bias *Matrix) (*Matrix, error) {
+	out, err := input.MatrixMul(weight)
+	if err != nil {
+		return nil, err
+	}
+	if err := out.AddRowBias(bias); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Full-Attention Forward Pass
 // 1. projects the inputs into Q, K and V
 // 2. splits and reshapes them across multiple attention heads
@@ -104,17 +128,17 @@ func (ca *CausalAttention) Forward(input *Matrix) (*Matrix, error) {
 	seqLen := input.rows
 
 	// time to project to Q, K and V
-	q, err := input.MatrixMul(ca.wq)
+	q, err := ca.projectBiased(input, ca.wq, ca.bq)
 	if err != nil {
 		return nil, err
 	}
 
-	k, err := input.MatrixMul(ca.wk)
+	k, err := ca.projectBiased(input, ca.wk, ca.bk)
 	if err != nil {
 		return nil, err
 	}
 
-	v, err := input.MatrixMul(ca.wv)
+	v, err := ca.projectBiased(input, ca.wv, ca.bv)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +203,7 @@ func (ca *CausalAttention) Forward(input *Matrix) (*Matrix, error) {
 	wg.Wait()
 
 	// the final output
-	output, err := headOutputs.MatrixMul(ca.wo)
+	output, err := ca.projectBiased(headOutputs, ca.wo, ca.bo)
 	if err != nil {
 		return nil, err
 	}
@@ -197,17 +221,17 @@ type AttentionActivations struct {
 func (ca *CausalAttention) ForwardSave(input *Matrix) (*Matrix, *AttentionActivations, error) {
 	seqLen := input.rows
 
-	q, err := input.MatrixMul(ca.wq)
+	q, err := ca.projectBiased(input, ca.wq, ca.bq)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	k, err := input.MatrixMul(ca.wk)
+	k, err := ca.projectBiased(input, ca.wk, ca.bk)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	v, err := input.MatrixMul(ca.wv)
+	v, err := ca.projectBiased(input, ca.wv, ca.bv)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -247,7 +271,7 @@ func (ca *CausalAttention) ForwardSave(input *Matrix) (*Matrix, *AttentionActiva
 		}
 	}
 
-	output, err := headOutputs.MatrixMul(ca.wo)
+	output, err := ca.projectBiased(headOutputs, ca.wo, ca.bo)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -273,6 +297,7 @@ func (ca *CausalAttention) Backward(acts *AttentionActivations, dOut *Matrix) (*
 		return nil, err
 	}
 	ca.wo.AccumulateGrad(dWo)
+	accumulateBiasGrad(ca.bo, dOut)
 
 	dQ := NewMatrix(seqLen, ca.dModel)
 	dK := NewMatrix(seqLen, ca.dModel)
@@ -335,18 +360,21 @@ func (ca *CausalAttention) Backward(acts *AttentionActivations, dOut *Matrix) (*
 		return nil, err
 	}
 	ca.wq.AccumulateGrad(dWq)
+	accumulateBiasGrad(ca.bq, dQ)
 
 	dInputK, dWk, err := acts.input.MatrixMulBackward(ca.wk, dK)
 	if err != nil {
 		return nil, err
 	}
 	ca.wk.AccumulateGrad(dWk)
+	accumulateBiasGrad(ca.bk, dK)
 
 	dInputV, dWv, err := acts.input.MatrixMulBackward(ca.wv, dV)
 	if err != nil {
 		return nil, err
 	}
 	ca.wv.AccumulateGrad(dWv)
+	accumulateBiasGrad(ca.bv, dV)
 
 	dInput, err := dInputQ.MatrixAdd(dInputK)
 	if err != nil {
@@ -365,15 +393,15 @@ func (ca *CausalAttention) Backward(acts *AttentionActivations, dOut *Matrix) (*
 func (ca *CausalAttention) ForwardWithCache(input *Matrix, cache *KvCache) (*Matrix, error) {
 	currentSeqLen := input.rows
 
-	q, err := input.MatrixMul(ca.wq)
+	q, err := ca.projectBiased(input, ca.wq, ca.bq)
 	if err != nil {
 		return nil, err
 	}
-	newK, err := input.MatrixMul(ca.wk)
+	newK, err := ca.projectBiased(input, ca.wk, ca.bk)
 	if err != nil {
 		return nil, err
 	}
-	newV, err := input.MatrixMul(ca.wv)
+	newV, err := ca.projectBiased(input, ca.wv, ca.bv)
 	if err != nil {
 		return nil, err
 	}
@@ -444,7 +472,7 @@ func (ca *CausalAttention) ForwardWithCache(input *Matrix, cache *KvCache) (*Mat
 	}
 	wg.Wait()
 
-	output, err := headOutputs.MatrixMul(ca.wo)
+	output, err := ca.projectBiased(headOutputs, ca.wo, ca.bo)
 	if err != nil {
 		return nil, err
 	}

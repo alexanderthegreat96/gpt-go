@@ -21,3 +21,21 @@ go.work.sum
 
 *.log
 tmp/
+
+# pretrained checkpoints, their tokenizer files and the reference dumps.
+# all downloadable, and far too big for git -> gpt2-medium alone is 1.5GB.
+# the glob covers gpt2, gpt2-medium, gpt2-large and gpt2-xl alike
+models/gpt2*/
+*.safetensors
+
+# generated knowledge graph, rebuilt by graphify update
+graphify-out/
+
+# python leftovers from scripts/
+__pycache__/
+*.pyc
+
+# the binary the setup script builds, in case it is interrupted before the
+# trap that removes it fires
+gpt-go
+gpt-go-setup

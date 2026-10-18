@@ -1,0 +1,32 @@
+# Line ending policy
+#
+# Everything text gets stored as LF in the repository and checked out as LF on
+# every platform. Without this, line endings depend on whichever git happens to
+# touch the file -> there are two installs on this machine that disagreed about
+# whether to apply the CRLF filter, and one reported 414 changed lines in
+# gpt/model.go where the other correctly reported 70. That makes diffs
+# unreadable and hides real changes inside byte noise.
+#
+# LF is also what the Go toolchain and gofmt are native to.
+#
+# NOTE: the existing history was committed with CRLF, so the first commit after
+# this file lands will renormalize the files it touches. Keep that in its own
+# commit if you want a clean feature diff -> see the README note below.
+* text=auto eol=lf
+
+# Model weights and reference dumps are raw float32, never to be line-ending
+# converted. They are gitignored too, this is belt and braces
+*.safetensors binary
+
+*.exe binary
+
+# Training corpora are DATA, not source. Never rewrite their bytes -> the BPE
+# tokenizer was trained on exactly these, and flipping CRLF to LF changes what
+# the tokenizer would learn (and therefore every token id downstream of it).
+# tiny_shakespeare is CRLF and tiny_wiki is LF, which is untidy but is the
+# ground truth both of their vocabularies were built against
+models/**/train.txt -text
+
+# Trained model and tokenizer JSON are generated artifacts holding float
+# arrays. Nothing good comes of line-ending conversion on a 4MB single line
+models/**/*.json -text

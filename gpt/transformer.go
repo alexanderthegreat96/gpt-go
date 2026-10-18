@@ -17,6 +17,18 @@ type FeedForward struct {
 	dInner int     // likely 4 x dModel
 	w1     *Matrix // shape: dModel x dInner
 	w2     *Matrix // shape: dInner x dModel
+
+	// bias vectors -> b1 is 1 x dInner, b2 is 1 x dModel
+	// nil for anything we train ourselves, filled in for pretrained gpt-2
+	// (c_fc.bias and c_proj.bias respectively)
+	b1 *Matrix
+	b2 *Matrix
+
+	// which flavour of GELU to run between the two projections.
+	// false -> the exact erf form, which is what our own training uses
+	// true  -> the tanh approximation, which is what gpt-2 was trained with
+	// see the comments on GELUTanh for why this distinction matters
+	useTanhGELU bool
 }
 
 func NewFeedForward(dModel int, scale float32) *FeedForward {
@@ -36,6 +48,24 @@ func NewFeedForward(dModel int, scale float32) *FeedForward {
 	}
 }
 
+// activate runs whichever GELU this FFN was built for
+func (ff *FeedForward) activate(input *Matrix) *Matrix {
+	if ff.useTanhGELU {
+		return input.GELUTanh()
+	}
+	return input.GELU()
+}
+
+// activateBackward is the matching derivative, picked the same way.
+// if these two ever disagree the gradients are silently wrong, which is why
+// they both read the one flag instead of being chosen at the call site
+func (ff *FeedForward) activateBackward(input *Matrix, dOut *Matrix) *Matrix {
+	if ff.useTanhGELU {
+		return GELUTanhBackward(input, dOut)
+	}
+	return GELUBackward(input, dOut)
+}
+
 // forward executes the FFN: linear1-> GELU -> linear2
 func (ff *FeedForward) Forward(input *Matrix) (*Matrix, error) {
 	// first linear projection aka expansion
@@ -43,13 +73,19 @@ func (ff *FeedForward) Forward(input *Matrix) (*Matrix, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := hidden.AddRowBias(ff.b1); err != nil {
+		return nil, err
+	}
 
 	// apply gely activation
-	activated := hidden.GELU()
+	activated := ff.activate(hidden)
 
 	// second linear projection which contracts back to dModel
 	output, err := activated.MatrixMul(ff.w2)
 	if err != nil {
+		return nil, err
+	}
+	if err := output.AddRowBias(ff.b2); err != nil {
 		return nil, err
 	}
 
@@ -141,6 +177,11 @@ type BlockActivations struct {
 	norm2Out   *Matrix
 	ffnW1Out   *Matrix
 	ffnGELUOut *Matrix
+
+	// the backward pass doesn't need these two, but the reference comparison
+	// in verify.go does -> they're the points a pytorch gpt-2 lets us hook
+	ffnOut *Matrix
+	output *Matrix
 }
 
 func (tb *TransformerBlock) ForwardSave(input *Matrix) (*Matrix, *BlockActivations, error) {
@@ -162,11 +203,17 @@ func (tb *TransformerBlock) ForwardSave(input *Matrix) (*Matrix, *BlockActivatio
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := ffnW1Out.AddRowBias(tb.ffn.b1); err != nil {
+		return nil, nil, err
+	}
 
-	ffnGELUOut := ffnW1Out.GELU()
+	ffnGELUOut := tb.ffn.activate(ffnW1Out)
 
 	ffnOut, err := ffnGELUOut.MatrixMul(tb.ffn.w2)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := ffnOut.AddRowBias(tb.ffn.b2); err != nil {
 		return nil, nil, err
 	}
 
@@ -184,6 +231,8 @@ func (tb *TransformerBlock) ForwardSave(input *Matrix) (*Matrix, *BlockActivatio
 		norm2Out:   norm2,
 		ffnW1Out:   ffnW1Out,
 		ffnGELUOut: ffnGELUOut,
+		ffnOut:     ffnOut,
+		output:     output,
 	}
 
 	return output, acts, nil
@@ -195,14 +244,16 @@ func (tb *TransformerBlock) Backward(acts *BlockActivations, dOut *Matrix) (*Mat
 		return nil, err
 	}
 	tb.ffn.w2.AccumulateGrad(dW2)
+	accumulateBiasGrad(tb.ffn.b2, dOut)
 
-	dFfnW1Out := GELUBackward(acts.ffnW1Out, dFfnGELUOut)
+	dFfnW1Out := tb.ffn.activateBackward(acts.ffnW1Out, dFfnGELUOut)
 
 	dNorm2, dW1, err := acts.norm2Out.MatrixMulBackward(tb.ffn.w1, dFfnW1Out)
 	if err != nil {
 		return nil, err
 	}
 	tb.ffn.w1.AccumulateGrad(dW1)
+	accumulateBiasGrad(tb.ffn.b1, dFfnW1Out)
 
 	dRes1FromLN2, dLn2Gamma, dLn2Beta := LayerNormBackward(acts.res1, tb.ln2Gamma, tb.epsilon, dNorm2)
 	tb.ln2Gamma.AccumulateGrad(dLn2Gamma)
